@@ -103,8 +103,8 @@ CheckUDPHeader::simple_action(Packet *p)
     const click_udp *udph = p->udp_header();
     unsigned iph_len = iph->ip_hl << 2;
     unsigned len = ntohs(udph->uh_ulen);
-    if (len < sizeof(click_udp) ||
-        p->length() < len + iph_len + p->network_header_offset()) {
+    bool is_long = p->length() < len + iph_len + p->network_header_offset();
+    if (len < sizeof(click_udp)) {
         return drop(BAD_LENGTH, p);
     }
 

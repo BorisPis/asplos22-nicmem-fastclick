@@ -105,8 +105,8 @@ CheckTCPHeader::simple_action(Packet *p)
     unsigned iph_len = iph->ip_hl << 2;
     unsigned len = ntohs(iph->ip_len) - iph_len;
     unsigned tcph_len = tcph->th_off << 2;
-    if (tcph_len < sizeof(click_tcp) || len < tcph_len ||
-        p->length() < len + iph_len + p->network_header_offset()) {
+    bool is_long = p->length() < len + iph_len + p->network_header_offset();
+    if (tcph_len < sizeof(click_tcp) || len < tcph_len) {
         return drop(BAD_LENGTH, p);
     }
 

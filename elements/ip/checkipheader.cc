@@ -181,7 +181,8 @@ inline CheckIPHeader::Reason CheckIPHeader::valid(Packet* p) {
 
     unsigned len = ntohs(ip->ip_len);
     if (len > plen || len < hlen)
-        return BAD_IP_LEN;
+        //return BAD_IP_LEN;
+	plen = len;
 
     if (_checksum) {
         int val;
