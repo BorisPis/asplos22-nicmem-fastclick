@@ -73,11 +73,14 @@ typedef uint32_t counter_t;
 #endif
 
 extern bool dpdk_enabled;
+extern bool dpdk_split_enabled;
+extern bool dpdk_nicmem_enabled;
 
 class DPDKDevice {
 public:
 
     portid_t port_id;
+    struct rte_mempool *data_pktmbuf_pool;
 
     DPDKDevice() CLICK_COLD;
     DPDKDevice(portid_t port_id) CLICK_COLD;
@@ -339,11 +342,13 @@ private:
 
     struct DevInfo info;
 
-
+#define MAX_SEGS_BUFFER_SPLIT (2)
+    static unsigned _rx_pkt_seg_lengths[MAX_SEGS_BUFFER_SPLIT];
     static int get_nb_mbuf(int socket);
     static bool _is_initialized;
     static HashTable<portid_t, DPDKDevice> _devs;
     static unsigned _nr_pktmbuf_pools;
+    static unsigned _nr_pktmbuf_segs;
     static bool no_more_buffer_msg_printed;
 
     int initialize_device(ErrorHandler *errh) CLICK_COLD;
@@ -351,6 +356,8 @@ private:
                     bool promisc, bool vlan_filter, bool vlan_strip, bool vlan_extend,
                     bool lro, bool jumbo, unsigned n_desc, ErrorHandler *errh) CLICK_COLD;
 
+    // non-static as we need the portid
+    int alloc_pktmbufs_data(ErrorHandler* errh, unsigned i) CLICK_COLD;
     static int alloc_pktmbufs(ErrorHandler* errh) CLICK_COLD;
 
     static DPDKDevice *ensure_device(const portid_t &port_id) {

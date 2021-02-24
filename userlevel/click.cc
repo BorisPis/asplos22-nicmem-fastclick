@@ -84,12 +84,16 @@ CLICK_USING_DECLS
 #define THREADS_AFF_OPT         319
 #define DPDK_OPT                320
 #define SIMTICK_OPT             321
+#define DPDK_SPLIT_OPT          322
+#define DPDK_NICMEM_OPT         323
 
 static const Clp_Option options[] = {
     { "allow-reconfigure", 'R', ALLOW_RECONFIG_OPT, 0, Clp_Negate },
     { "clickpath", 'C', CLICKPATH_OPT, Clp_ValString, 0 },
     { "expression", 'e', EXPRESSION_OPT, Clp_ValString, 0 },
     { "dpdk", 0, DPDK_OPT, 0, 0 },
+    { "dpdk-split", 0, DPDK_SPLIT_OPT, 0, 0 },
+    { "dpdk-nicmem", 0, DPDK_NICMEM_OPT, 0, 0 },
     { "file", 'f', ROUTER_OPT, Clp_ValString, 0 },
     { "handler", 'h', HANDLER_OPT, Clp_ValString, 0 },
     { "help", 0, HELP_OPT, 0, 0 },
@@ -346,6 +350,8 @@ static Vector<String> cs_sockets;
 static bool warnings = true;
 int click_nthreads = 1;
 bool dpdk_enabled = false;
+bool dpdk_split_enabled = false;
+bool dpdk_nicmem_enabled = false;
 
 static String
 click_driver_control_socket_name(int number)
@@ -631,6 +637,14 @@ main(int argc, char **argv)
       warnings = clp->negated;
       break;
 #if HAVE_DPDK
+     case DPDK_SPLIT_OPT:
+      dpdk_split_enabled = true;
+      break;
+
+     case DPDK_NICMEM_OPT:
+      dpdk_nicmem_enabled = true;
+      break;
+
      case DPDK_OPT: {
       const char* arg;
       dpdk_arg.push_back(argv[0]);

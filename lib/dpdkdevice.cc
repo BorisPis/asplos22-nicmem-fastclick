@@ -25,7 +25,9 @@
 #include <click/dpdkdevice.hh>
 #include <click/userutils.hh>
 #include <rte_errno.h>
+#include <rte_malloc.h>
 #include <click/dpdk_glue.hh>
+#include <execinfo.h>
 
 #if CLICK_PACKET_USE_DPDK
 #define DPDK_ANNO_SIZE sizeof(Packet::AllAnno)
@@ -42,7 +44,7 @@ extern "C" {
 
 CLICK_DECLS
 
-DPDKDevice::DPDKDevice() : port_id(-1), info() {
+DPDKDevice::DPDKDevice() : port_id(-1), data_pktmbuf_pool(NULL), info() {
 }
 
 DPDKDevice::DPDKDevice(portid_t port_id) : port_id(port_id) {
@@ -50,6 +52,7 @@ DPDKDevice::DPDKDevice(portid_t port_id) : port_id(port_id) {
         if (port_id >= 0)
             initialize_flow_rule_manager(port_id, ErrorHandler::default_handler());
     #endif
+	data_pktmbuf_pool = NULL;
 };
 
 uint16_t DPDKDevice::get_device_vendor_id()
@@ -176,6 +179,99 @@ int DPDKDevice::get_nb_mbuf(int socket) {
         return NB_MBUF[socket % NB_MBUF.size()];
 }
 
+int DPDKDevice::alloc_pktmbufs_data(ErrorHandler* errh, unsigned numa_node)
+{
+    String mempool_name = DPDKDevice::MEMPOOL_PREFIX + String(numa_node) + String(":data");
+    const char* name = mempool_name.c_str();
+    struct rte_pktmbuf_extmem ext_mem[10240];
+    int ret, ext_mem_num = 1;
+
+    if (data_pktmbuf_pool) {
+	    printf("data pktmbuf already exists for %s\n", mempool_name.c_str());
+	    return 0;
+    }
+
+    ext_mem[0].elt_size = _rx_pkt_seg_lengths[1];
+    ext_mem[0].buf_len = get_nb_mbuf(numa_node) * ext_mem[0].elt_size;
+
+    if (dpdk_nicmem_enabled) {
+	    int totsz = 0, j = 0;
+
+	    //printf("Alloc nic pinned mem\n");
+	    ret = rte_dev_alloc_dm(rte_eth_devices[port_id].device,
+				   &ext_mem[0].buf_ptr,
+				   &ext_mem[0].buf_len);
+	    if (ret || ext_mem[0].buf_len == 0) {
+		    printf("[-] Failed to allocate NIC memory\n"
+			   "    Entering fallback using host memory\n");
+		    /* reset ext_mem and restart with ext-host mem */
+		    ext_mem[0].elt_size = _rx_pkt_seg_lengths[1];
+		    ext_mem[0].buf_len = get_nb_mbuf(numa_node) * ext_mem[0].elt_size;
+		    goto host_mem_fallback;
+	    }
+
+	    printf("[+] Allocated device memory: %p %lu\n",
+		   ext_mem[0].buf_ptr,
+		   ext_mem[0].buf_len);
+
+	    // if (numa_node == 0) {
+	    ext_mem[0].buf_iova = RTE_BAD_IOVA;
+	    // ret = rte_extmem_register(ext_mem[0].buf_ptr,
+	    //     		      ext_mem[0].buf_len, NULL,
+	    //     		      ext_mem[0].buf_iova, 4096);
+	    // if (ret)
+	    //         rte_exit(EXIT_FAILURE,
+	    //     	     "Failed to register NIC memory %p %lu\n",
+	    //     	     ext_mem[0].buf_ptr, ext_mem[0].buf_len);
+	    // }
+
+	    ret = rte_dev_get_dma_map(rte_eth_devices[port_id].device,
+				      ext_mem[0].buf_ptr, ext_mem[0].buf_iova,
+				      ext_mem[0].buf_len);
+	    if (ret)
+		    rte_exit(EXIT_FAILURE,
+			     "NIC DMA map failed\n");
+
+	    /* This fills external memory with repeated
+	     * instances of NIC memory to overcome the
+	     * limitation on NIC memory size
+	     */
+	    totsz = ext_mem[0].buf_len / ext_mem[0].elt_size;
+	    while (totsz < get_nb_mbuf(numa_node)) {
+		    ext_mem[++j] = ext_mem[0];
+		    totsz += (ext_mem[j].buf_len / ext_mem[j].elt_size);
+	    }
+	    ext_mem_num = j + 1;
+	    data_pktmbuf_pool =
+		    rte_pktmbuf_pool_create_extbuf(name, get_nb_mbuf(numa_node),
+						   MBUF_CACHE_SIZE, DPDK_ANNO_SIZE,
+						   ext_mem[0].elt_size,
+						   numa_node, &ext_mem[0],
+						   ext_mem_num);
+	    //printf("%p %d\n", ext_mem[1].buf_ptr, ext_mem[1].buf_len);
+    } else { // host mem
+host_mem_fallback:
+	    // ext_mem[0].buf_ptr = rte_malloc_socket("extmem", ext_mem[0].buf_len, 0, numa_node);
+	    // ext_mem[0].buf_iova = 0; // ignored in mlx5
+	    // ret = rte_dev_dma_map(rte_eth_devices[port_id].device,
+	    //     		  ext_mem[0].buf_ptr, ext_mem[0].buf_iova,
+	    //     		  ext_mem[0].buf_len);
+	    printf("Host-backed memory data mbuf pool\n");
+	    data_pktmbuf_pool =
+		    rte_pktmbuf_pool_create(name, get_nb_mbuf(numa_node),
+					    MBUF_CACHE_SIZE, DPDK_ANNO_SIZE,
+					    ext_mem[0].elt_size,
+					    numa_node);
+    }
+
+    if (!data_pktmbuf_pool) {
+	    errh->error("Could not allocate data MBuf pools %d with %d buffers : error %d (%s)",numa_node, get_nb_mbuf(numa_node), rte_errno,rte_strerror(rte_errno));
+	    return rte_errno;
+    }
+
+    return 0;
+}
+
 int DPDKDevice::alloc_pktmbufs(ErrorHandler* errh)
 {
     /* Count NUMA sockets for each device and each node, we do not want to
@@ -199,10 +295,11 @@ int DPDKDevice::alloc_pktmbufs(ErrorHandler* errh)
     if (max_socket == -1)
         max_socket = 0;
 
-    unsigned n_pktmbuf_pools = max_socket + 1;
+    unsigned n_pktmbuf_pools = (max_socket + 1);
 
     // Allocate pktmbuf_pool array
     typedef struct rte_mempool *rte_mempool_p;
+    printf("alloc_pktmbufs %d\n", n_pktmbuf_pools);
     if (_nr_pktmbuf_pools < n_pktmbuf_pools) {
         auto pktmbuf_pools = new rte_mempool_p[n_pktmbuf_pools];
         if (!pktmbuf_pools)
@@ -240,8 +337,14 @@ int DPDKDevice::alloc_pktmbufs(ErrorHandler* errh)
                         const char* name = mempool_name.c_str();
                         _pktmbuf_pools[i] =
 #if RTE_VERSION >= RTE_VERSION_NUM(2,2,0,0)
-                        rte_pktmbuf_pool_create(name, get_nb_mbuf(i),
-                                                MBUF_CACHE_SIZE, DPDK_ANNO_SIZE, MBUF_DATA_SIZE, i);
+                            dpdk_split_enabled ?
+                                rte_pktmbuf_pool_create(name, get_nb_mbuf(i),
+                                                        MBUF_CACHE_SIZE, DPDK_ANNO_SIZE,
+                                                        _rx_pkt_seg_lengths[0], i)
+			:
+                                rte_pktmbuf_pool_create(name, get_nb_mbuf(i),
+                                                        MBUF_CACHE_SIZE, DPDK_ANNO_SIZE,
+                                                        MBUF_DATA_SIZE, i);
 #else
                         rte_mempool_create(
                                         name, get_nb_mbuf(i), MBUF_SIZE, MBUF_CACHE_SIZE,
@@ -256,8 +359,10 @@ int DPDKDevice::alloc_pktmbufs(ErrorHandler* errh)
                         }
                 }
         }
-    } else {
+    } else { // secondary process
         int i = 0;
+	printf("Secondary DPDK process running!!!\n");
+	errh->error("Secondary DPDK process running!!!");
         rte_mempool_walk(add_pool,(void*)&i);
         if (i == 0) {
             return errh->error("Could not get pools from the primary DPDK process");
@@ -452,6 +557,13 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
     dev_conf.rxmode.offloads = DEV_RX_OFFLOAD_CRC_STRIP;
     dev_conf.txmode.offloads = 0;
 #endif
+    if (dpdk_split_enabled) {
+	    dev_conf.rxmode.offloads |= DEV_RX_OFFLOAD_CHECKSUM |
+				        DEV_RX_OFFLOAD_BUFFER_SPLIT |
+					DEV_RX_OFFLOAD_SCATTER;
+	    dev_conf.rxmode.split_hdr_size = 0;
+	    dev_conf.txmode.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
+    }
 
     if (info.mq_mode & ETH_MQ_RX_VMDQ_FLAG) {
 
@@ -531,7 +643,8 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
         }
     }
     //Click does not use multi-segs
-    dev_conf.txmode.offloads &= ~DEV_TX_OFFLOAD_MULTI_SEGS;
+    //[BP]: But, header-data split requires it
+    //dev_conf.txmode.offloads &= ~DEV_TX_OFFLOAD_MULTI_SEGS;
 #endif
 
 #if RTE_VERSION < RTE_VERSION_NUM(18,05,0,0)
@@ -666,13 +779,39 @@ also                ETH_TXQ_FLAGS_NOMULTMEMP
 #endif
 
     int numa_node = DPDKDevice::get_port_numa_node(port_id);
-    for (unsigned i = 0; i < (unsigned)info.rx_queues.size(); ++i) {
-        if (rte_eth_rx_queue_setup(
-                port_id, i, info.n_rx_descs, numa_node, &rx_conf,
-                _pktmbuf_pools[numa_node]) != 0)
-            return errh->error(
-                "Cannot initialize RX queue %u of port %u on node %u : %s",
-                i, port_id, numa_node, rte_strerror(rte_errno));
+    if (dpdk_split_enabled) {
+	    struct rte_eth_rxseg rx_seg[MAX_SEGS_BUFFER_SPLIT] = {};
+	    unsigned seg_i;
+
+	    if (alloc_pktmbufs_data(errh, numa_node))
+		    return errh->error("Failed to allocate pktmbuf data\n");
+
+	    rx_seg[0].length = _rx_pkt_seg_lengths[0] - RTE_PKTMBUF_HEADROOM;
+	    rx_seg[1].length = _rx_pkt_seg_lengths[1];
+
+	    rx_seg[0].mp = _pktmbuf_pools[numa_node];
+	    rx_seg[1].mp = data_pktmbuf_pool;
+
+	    rx_conf.offloads |= DEV_RX_OFFLOAD_BUFFER_SPLIT | DEV_RX_OFFLOAD_SCATTER;
+	    tx_conf.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
+	    for (unsigned i = 0; i < (unsigned)info.rx_queues.size(); ++i) {
+		    if (rte_eth_rx_queue_setup_ex(port_id, i,
+						    info.n_rx_descs, numa_node,
+						    &rx_conf,
+						    rx_seg, MAX_SEGS_BUFFER_SPLIT))
+		    return errh->error(
+			"Cannot initialize extended RX queue %u of port %u on node %u : %s",
+			i, port_id, numa_node, rte_strerror(rte_errno));
+	    }
+    } else {
+	    for (unsigned i = 0; i < (unsigned)info.rx_queues.size(); ++i) {
+		if (rte_eth_rx_queue_setup(
+			port_id, i, info.n_rx_descs, numa_node, &rx_conf,
+			_pktmbuf_pools[numa_node]) != 0)
+		    return errh->error(
+			"Cannot initialize RX queue %u of port %u on node %u : %s",
+			i, port_id, numa_node, rte_strerror(rte_errno));
+	    }
     }
 
     for (unsigned i = 0; i < (unsigned)info.tx_queues.size(); ++i)
@@ -1023,6 +1162,14 @@ int DPDKDevice::static_initialize(ErrorHandler* errh) {
         return errh->error("You must start Click with --dpdk option when compiling with --enable-dpdk-pool");
     }
 #endif
+    if ((dpdk_split_enabled || dpdk_nicmem_enabled) && !dpdk_enabled)
+        return errh->error("Cannot use --dpdk-split or --dpdk-nicmem without the --dpdk option");
+
+    if (dpdk_split_enabled)
+        _nr_pktmbuf_segs = 2;
+    else
+        _nr_pktmbuf_segs = 1;
+
     if (alloc_pktmbufs(errh)) {
         if (rte_errno == 12) {
             errh->error("Maybe try to allocate less buffers with DPDKInfo(X) or allocate more memory to DPDK by giving/increasing the -m parameter or allocate more hugepages.");
@@ -1190,10 +1337,12 @@ DPDKDeviceArg::parse(
     if (!IntArg().parse(str, port_id)) {
 #if RTE_VERSION >= RTE_VERSION_NUM(18,05,0,0)
        uint16_t id;
+       printf("rte_eth_dev_get_port %s\n", str.c_str());
        if (rte_eth_dev_get_port_by_name(str.c_str(), &id) != 0)
            return false;
        else
            port_id = id;
+       printf("port_id %d\n", id);
 #else
        //Try parsing a ffff:ff:ff.f format. Code adapted from EtherAddressArg::parse
         unsigned data[4];
@@ -1398,10 +1547,13 @@ unsigned DPDKDevice::RING_SIZE  = 64;
 unsigned DPDKDevice::RING_POOL_CACHE_SIZE = 32;
 unsigned DPDKDevice::RING_PRIV_DATA_SIZE  = 0;
 
+unsigned DPDKDevice::_rx_pkt_seg_lengths[MAX_SEGS_BUFFER_SPLIT] = {RTE_PKTMBUF_HEADROOM + 128 + DPDK_ANNO_SIZE, 2048};
+
 bool DPDKDevice::_is_initialized = false;
 HashTable<portid_t, DPDKDevice> DPDKDevice::_devs;
 struct rte_mempool** DPDKDevice::_pktmbuf_pools;
 unsigned DPDKDevice::_nr_pktmbuf_pools;
+unsigned DPDKDevice::_nr_pktmbuf_segs;
 bool DPDKDevice::no_more_buffer_msg_printed = false;
 
 CLICK_ENDDECLS
