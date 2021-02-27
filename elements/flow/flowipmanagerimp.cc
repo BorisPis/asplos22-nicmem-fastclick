@@ -53,10 +53,13 @@ FlowIPManagerIMP::configure(Vector<String> &conf, ErrorHandler *errh)
 
 int FlowIPManagerIMP::solve_initialize(ErrorHandler *errh)
 {
+    static int counter = 0;
     struct rte_hash_parameters hash_params = {0};
-    char buf[64];
+    char buf[32];
     hash_params.name = buf;
     auto passing = get_passing_threads();
+    char inner_name[16];
+
     _tables_count = passing.size();
     _table_size = next_pow2(_table_size/passing.weight());
     click_chatter("Real capacity for each table will be %d", _table_size);
@@ -64,7 +67,7 @@ int FlowIPManagerIMP::solve_initialize(ErrorHandler *errh)
     hash_params.key_len = sizeof(IPFlow5ID);
     hash_params.hash_func = ipv4_hash_crc;
     hash_params.hash_func_init_val = 0;
-    hash_params.extra_flag = _flags;
+    hash_params.extra_flag = _flags | RTE_HASH_EXTRA_FLAGS_EXT_TABLE;
 
     _flow_state_size_full = sizeof(FlowControlBlock) + _reserve;
 
@@ -74,12 +77,17 @@ int FlowIPManagerIMP::solve_initialize(ErrorHandler *errh)
     for (int i = 0; i < _tables_count; i++) {
         if (!passing[i])
             continue;
-        sprintf(buf, "%d-%s",i,name().c_str());
+        //sprintf(buf, "%d-%s",i,name().c_str());
+        memcpy(inner_name, name().c_str(), 16);
+        inner_name[16 - 1] = '\0';
+        snprintf(buf, sizeof(buf), "%s%d", inner_name, counter++);
+
         _tables[i].hash = rte_hash_create(&hash_params);
         if (!_tables[i].hash)
             return errh->error("Could not init flow table %d : error %d (%s)!", i, rte_errno, rte_strerror(rte_errno));
 
         _tables[i].fcbs =  (FlowControlBlock*)CLICK_ALIGNED_ALLOC(_flow_state_size_full * _table_size);
+        click_chatter("Created fcbs %d\n", _tables[i].fcbs);
         CLICK_ASSERT_ALIGNED(_tables[i].fcbs);
         bzero(_tables[i].fcbs,_flow_state_size_full * _table_size);
         if (!_tables[i].fcbs)

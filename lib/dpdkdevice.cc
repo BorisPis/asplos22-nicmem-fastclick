@@ -182,9 +182,12 @@ int DPDKDevice::get_nb_mbuf(int socket) {
 int DPDKDevice::alloc_pktmbufs_data(ErrorHandler* errh, unsigned numa_node)
 {
     String mempool_name = DPDKDevice::MEMPOOL_PREFIX + String(numa_node) + String(":data");
-    const char* name = mempool_name.c_str();
+    const char* pool_name = mempool_name.c_str();
     struct rte_pktmbuf_extmem ext_mem[10240];
     int ret, ext_mem_num = 1;
+    char name[64];
+
+    snprintf(name, sizeof(name), "%s%d", pool_name, port_id);
 
     if (data_pktmbuf_pool) {
 	    printf("data pktmbuf already exists for %s\n", mempool_name.c_str());

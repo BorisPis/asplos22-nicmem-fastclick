@@ -174,10 +174,18 @@ template <typename T> class MPMCDynamicRing {
     }
 
     inline void initialize(int size, const char* name, int flags = 0) {
+        static int counter = 0;
+        char short_name[30];
+        char inner_name[24];
+
+        memcpy(inner_name, name, 24);
+        inner_name[24 - 1] = '\0';
+        snprintf(short_name, sizeof(short_name), "%s%d", inner_name, counter++);
+
         assert(!_ring);
-        _ring = rte_ring_create(name, next_pow2(size), SOCKET_ID_ANY, flags);
+        _ring = rte_ring_create(short_name, next_pow2(size), SOCKET_ID_ANY, flags);
         if (unlikely(_ring == 0)) {
-            click_chatter("Could not create DPDK ring error %d: %s",rte_errno,rte_strerror(rte_errno));
+            click_chatter("Could not create DPDK ring %s (%d) error %d: %s",inner_name,strlen(inner_name), rte_errno,rte_strerror(rte_errno));
         }
     }
 
