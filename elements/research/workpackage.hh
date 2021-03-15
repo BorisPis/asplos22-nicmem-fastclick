@@ -36,6 +36,7 @@ class WorkPackage : public BatchElement {
         int _r;
         int _n;
         int _w;
+        bool _write;
         bool _payload;
         Vector<uint32_t> _array;
         per_thread<std::mt19937> _gens;
