@@ -53,6 +53,10 @@ FromDPDKDevice::FromDPDKDevice() :
 #endif
     _burst = 32;
     ndesc = 0;
+    _accum = 0;
+    _count = 0;
+    _idle = 0;
+    _idle_count = 0;
 }
 
 FromDPDKDevice::~FromDPDKDevice()
@@ -296,9 +300,11 @@ bool FromDPDKDevice::run_task(Task *t)
 {
     struct rte_mbuf *pkts[_burst];
     int ret = 0;
+    click_cycles_t before;
 
     for (int iqueue = queue_for_thisthread_begin();
             iqueue<=queue_for_thisthread_end(); iqueue++) {
+         before = click_get_cycles();
 #if HAVE_BATCH
          PacketBatch* head = 0;
          WritablePacket *last;
@@ -360,7 +366,12 @@ bool FromDPDKDevice::run_task(Task *t)
         if (n) {
             add_count(n);
             ret = 1;
-        }
+	    _accum += click_get_cycles() - before;
+	    _count += n;
+        } else {
+	    _idle += click_get_cycles() - before;
+	    _idle_count += 1;
+	}
     }
 
 #if HAVE_DPDK_INTERRUPT
@@ -414,6 +425,7 @@ enum {
     h_rss,
     h_mac, h_add_mac, h_remove_mac, h_vf_mac,
     h_mtu,
+    h_cycles, h_cycles_idle,
     h_device, h_isolate,
 #if HAVE_FLOW_API
     h_rule_add, h_rules_del, h_rules_flush,
@@ -450,6 +462,22 @@ String FromDPDKDevice::read_handler(Element *e, void * thunk)
                 return String("<error>");
             return String(mtu);
                     }
+        case h_cycles: {
+            if (likely(fd->_count))
+                return String(fd->_accum / fd->_count);
+            else
+                return String(0);
+        }
+        case h_cycles_idle: {
+            if (likely(fd->_idle_count)) {
+                //return String(fd->_idle / fd->_idle_count);
+		//uint64_t idle = fd->_idle > 2000000000 ? fd->_idle - 2000000000 : 0;
+                //return String((double)idle / (double)(idle + fd->_accum));
+                //return String(idle);
+                return String((double)fd->_idle / (double)(fd->_idle + fd->_accum));
+	    } else
+                return String(0);
+        }
         case h_mac: {
             if (!fd->_dev)
                 return String::make_empty();
@@ -648,6 +676,17 @@ int FromDPDKDevice::write_handler(
             fd->_dev->set_isolation_mode(status);
             return 0;
         }
+        case h_cycles: {
+	    fd->_accum = 0;
+	    fd->_count = 0;
+        }
+        case h_cycles_idle: {
+	    fd->_idle = 0;
+	    fd->_idle_count = 0;
+        }
+	case h_xstats: {
+		rte_eth_xstats_reset(fd->_dev->port_id);
+	}
 
     }
     return -1;
@@ -901,7 +940,12 @@ void FromDPDKDevice::add_handlers()
 #endif
 
     add_read_handler("mtu",read_handler, h_mtu);
+    add_read_handler("cycles_pb",read_handler, h_cycles);
+    add_read_handler("cycles_idle",read_handler, h_cycles_idle);
+    add_write_handler("cycles_pb",write_handler, h_cycles);
+    add_write_handler("cycles_idle",write_handler, h_cycles_idle);
     add_data_handlers("burst", Handler::h_read | Handler::h_write, &_burst);
+    add_write_handler("xstats",write_handler, h_xstats);
 }
 
 CLICK_ENDDECLS

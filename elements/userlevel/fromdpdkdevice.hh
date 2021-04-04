@@ -464,6 +464,10 @@ protected:
     bool _uco;
     bool _ipco;
     bool _clear;
+    uint64_t _accum;
+    uint64_t _count;
+    uint64_t _idle;
+    uint64_t _idle_count;
 };
 
 CLICK_ENDDECLS
