@@ -247,7 +247,7 @@ int DPDKDevice::alloc_pktmbufs_data(ErrorHandler* errh, unsigned numa_node)
 	    ext_mem_num = j + 1;
 	    data_pktmbuf_pool =
 		    rte_pktmbuf_pool_create_extbuf(name, get_nb_mbuf(numa_node),
-						   MBUF_CACHE_SIZE, DPDK_ANNO_SIZE,
+						   MBUF_CACHE_SIZE, 0,
 						   ext_mem[0].elt_size,
 						   numa_node, &ext_mem[0],
 						   ext_mem_num);
@@ -259,10 +259,10 @@ host_mem_fallback:
 	    // ret = rte_dev_dma_map(rte_eth_devices[port_id].device,
 	    //     		  ext_mem[0].buf_ptr, ext_mem[0].buf_iova,
 	    //     		  ext_mem[0].buf_len);
-	    printf("Host-backed memory data mbuf pool\n");
+	    printf("Host-backed memory data mbuf pool: %s\n", name);
 	    data_pktmbuf_pool =
 		    rte_pktmbuf_pool_create(name, get_nb_mbuf(numa_node),
-					    MBUF_CACHE_SIZE, DPDK_ANNO_SIZE,
+					    MBUF_CACHE_SIZE, 0,
 					    ext_mem[0].elt_size,
 					    numa_node);
     }
@@ -567,6 +567,7 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
 	    dev_conf.rxmode.split_hdr_size = 0;
 	    dev_conf.txmode.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
     }
+    dev_conf.txmode.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
 
     if (info.mq_mode & ETH_MQ_RX_VMDQ_FLAG) {
 
@@ -798,8 +799,9 @@ also                ETH_TXQ_FLAGS_NOMULTMEMP
 	    rx_conf.offloads |= DEV_RX_OFFLOAD_BUFFER_SPLIT | DEV_RX_OFFLOAD_SCATTER;
 	    tx_conf.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
 	    for (unsigned i = 0; i < (unsigned)info.rx_queues.size(); ++i) {
+		    // 2x n_rx_descs as each packet is two descriptors
 		    if (rte_eth_rx_queue_setup_ex(port_id, i,
-						    info.n_rx_descs, numa_node,
+						    info.n_rx_descs * 2, numa_node,
 						    &rx_conf,
 						    rx_seg, MAX_SEGS_BUFFER_SPLIT))
 		    return errh->error(
@@ -807,6 +809,7 @@ also                ETH_TXQ_FLAGS_NOMULTMEMP
 			i, port_id, numa_node, rte_strerror(rte_errno));
 	    }
     } else {
+	    tx_conf.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
 	    for (unsigned i = 0; i < (unsigned)info.rx_queues.size(); ++i) {
 		if (rte_eth_rx_queue_setup(
 			port_id, i, info.n_rx_descs, numa_node, &rx_conf,
@@ -1550,7 +1553,7 @@ unsigned DPDKDevice::RING_SIZE  = 64;
 unsigned DPDKDevice::RING_POOL_CACHE_SIZE = 32;
 unsigned DPDKDevice::RING_PRIV_DATA_SIZE  = 0;
 
-unsigned DPDKDevice::_rx_pkt_seg_lengths[MAX_SEGS_BUFFER_SPLIT] = {RTE_PKTMBUF_HEADROOM + 128 + DPDK_ANNO_SIZE, 2048};
+unsigned DPDKDevice::_rx_pkt_seg_lengths[MAX_SEGS_BUFFER_SPLIT] = {RTE_PKTMBUF_HEADROOM + 64 + DPDK_ANNO_SIZE, 2048};
 
 bool DPDKDevice::_is_initialized = false;
 HashTable<portid_t, DPDKDevice> DPDKDevice::_devs;
