@@ -306,7 +306,7 @@ String::String(uint64_t x)
 String::String(double x)
 {
     char buf[128];
-    int len = sprintf(buf, "%.12g", x);
+    int len = sprintf(buf, "%.2f", x);
     assign(buf, len, false);
 }
 #endif
