@@ -35,6 +35,7 @@ int DPDKInfo::configure(Vector<String> &conf, ErrorHandler *errh) {
         .read_all("NB_SOCKET_MBUF", DPDKDevice::NB_MBUF).read_status(has_socket_mbuf)
         .read("MBUF_SIZE", DPDKDevice::MBUF_DATA_SIZE)
         .read("MBUF_CACHE_SIZE", DPDKDevice::MBUF_CACHE_SIZE)
+        .read("MAX_HDS_QUEUES", DPDKDevice::MAX_HDS_QUEUES)
         .read("RX_PTHRESH", DPDKDevice::RX_PTHRESH)
         .read("RX_HTHRESH", DPDKDevice::RX_HTHRESH)
         .read("RX_WTHRESH", DPDKDevice::RX_WTHRESH)

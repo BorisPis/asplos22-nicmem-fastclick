@@ -81,6 +81,7 @@ public:
 
     portid_t port_id;
     struct rte_mempool *data_pktmbuf_pool;
+    struct rte_mempool *hdr_pktmbuf_pool;
 
     DPDKDevice() CLICK_COLD;
     DPDKDevice(portid_t port_id) CLICK_COLD;
@@ -279,6 +280,7 @@ public:
     static int DEFAULT_NB_MBUF;
     static int MBUF_DATA_SIZE;
     static int MBUF_SIZE;
+    static int MAX_HDS_QUEUES;
     static int MBUF_CACHE_SIZE;
     static int RX_PTHRESH;
     static int RX_HTHRESH;

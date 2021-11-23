@@ -44,7 +44,7 @@ extern "C" {
 
 CLICK_DECLS
 
-DPDKDevice::DPDKDevice() : port_id(-1), data_pktmbuf_pool(NULL), info() {
+DPDKDevice::DPDKDevice() : port_id(-1), hdr_pktmbuf_pool(NULL), data_pktmbuf_pool(NULL), info() {
 }
 
 DPDKDevice::DPDKDevice(portid_t port_id) : port_id(port_id) {
@@ -53,6 +53,7 @@ DPDKDevice::DPDKDevice(portid_t port_id) : port_id(port_id) {
             initialize_flow_rule_manager(port_id, ErrorHandler::default_handler());
     #endif
 	data_pktmbuf_pool = NULL;
+	hdr_pktmbuf_pool = NULL;
 };
 
 uint16_t DPDKDevice::get_device_vendor_id()
@@ -181,21 +182,29 @@ int DPDKDevice::get_nb_mbuf(int socket) {
 
 int DPDKDevice::alloc_pktmbufs_data(ErrorHandler* errh, unsigned numa_node)
 {
-    String mempool_name = DPDKDevice::MEMPOOL_PREFIX + String(numa_node) + String(":data");
+    String mempool_name = DPDKDevice::MEMPOOL_PREFIX + String(numa_node) + String(":hds");
     const char* pool_name = mempool_name.c_str();
     struct rte_pktmbuf_extmem ext_mem[10240];
     int ret, ext_mem_num = 1;
-    char name[64];
+    char name[64], hname[64];
+    unsigned int nb_mbuf = DPDKDevice::MAX_HDS_QUEUES * (info.n_rx_descs + info.n_tx_descs) * 2;
 
-    snprintf(name, sizeof(name), "%s%d", pool_name, port_id);
+    if (nb_mbuf >= 65536 || DPDKDevice::MAX_HDS_QUEUES == -1 || DPDKDevice::MAX_HDS_QUEUES == 0)
+	    nb_mbuf = 65536 - 1;
+    printf("Using %d MBUFs for header-data split\n", nb_mbuf);
 
-    if (data_pktmbuf_pool) {
-	    printf("data pktmbuf already exists for %s\n", mempool_name.c_str());
+    snprintf(name, sizeof(name), "d_%s%d", pool_name, port_id);
+    snprintf(hname, sizeof(hname), "h_%s%d", pool_name, port_id);
+
+    if (data_pktmbuf_pool || hdr_pktmbuf_pool) {
+	    printf("hdr/data pktmbuf already exists for %s %p %p\n", mempool_name.c_str(),
+		   data_pktmbuf_pool, hdr_pktmbuf_pool);
 	    return 0;
     }
 
     ext_mem[0].elt_size = _rx_pkt_seg_lengths[1];
-    ext_mem[0].buf_len = get_nb_mbuf(numa_node) * ext_mem[0].elt_size;
+    // ext_mem[0].buf_len = get_nb_mbuf(numa_node) * ext_mem[0].elt_size;
+    ext_mem[0].buf_len = nb_mbuf * _rx_pkt_seg_lengths[1];
 
     if (dpdk_nicmem_enabled) {
 	    int totsz = 0, j = 0;
@@ -209,7 +218,7 @@ int DPDKDevice::alloc_pktmbufs_data(ErrorHandler* errh, unsigned numa_node)
 			   "    Entering fallback using host memory\n");
 		    /* reset ext_mem and restart with ext-host mem */
 		    ext_mem[0].elt_size = _rx_pkt_seg_lengths[1];
-		    ext_mem[0].buf_len = get_nb_mbuf(numa_node) * ext_mem[0].elt_size;
+		    ext_mem[0].buf_len = nb_mbuf * _rx_pkt_seg_lengths[1];
 		    goto host_mem_fallback;
 	    }
 
@@ -240,13 +249,13 @@ int DPDKDevice::alloc_pktmbufs_data(ErrorHandler* errh, unsigned numa_node)
 	     * limitation on NIC memory size
 	     */
 	    totsz = ext_mem[0].buf_len / ext_mem[0].elt_size;
-	    while (totsz < get_nb_mbuf(numa_node)) {
+	    while (totsz < nb_mbuf) {
 		    ext_mem[++j] = ext_mem[0];
 		    totsz += (ext_mem[j].buf_len / ext_mem[j].elt_size);
 	    }
 	    ext_mem_num = j + 1;
 	    data_pktmbuf_pool =
-		    rte_pktmbuf_pool_create_extbuf(name, get_nb_mbuf(numa_node),
+		    rte_pktmbuf_pool_create_extbuf(name, nb_mbuf,
 						   MBUF_CACHE_SIZE, 0,
 						   ext_mem[0].elt_size,
 						   numa_node, &ext_mem[0],
@@ -254,21 +263,39 @@ int DPDKDevice::alloc_pktmbufs_data(ErrorHandler* errh, unsigned numa_node)
 	    //printf("%p %d\n", ext_mem[1].buf_ptr, ext_mem[1].buf_len);
     } else { // host mem
 host_mem_fallback:
-	    // ext_mem[0].buf_ptr = rte_malloc_socket("extmem", ext_mem[0].buf_len, 0, numa_node);
+	    // char extname[64];
+
+	    // snprintf(extname, sizeof(extname), "ext%s%d", pool_name, port_id);
+	    // ext_mem[0].buf_ptr = rte_malloc(extname, ext_mem[0].buf_len, 64);
 	    // ext_mem[0].buf_iova = 0; // ignored in mlx5
-	    // ret = rte_dev_dma_map(rte_eth_devices[port_id].device,
-	    //     		  ext_mem[0].buf_ptr, ext_mem[0].buf_iova,
-	    //     		  ext_mem[0].buf_len);
+	    // if (!ext_mem[0].buf_ptr) {
+	    //     printf("Bad rte_malloc %d!\n", ext_mem[0].buf_len);
+	    //     return -1;
+	    // }
+	    // data_pktmbuf_pool =
+	    //     rte_pktmbuf_pool_create_extbuf(name, get_nb_mbuf(numa_node),
+	    //                    MBUF_CACHE_SIZE, 0,
+	    //                    ext_mem[0].elt_size,
+	    //                    numa_node, &ext_mem[0],
+	    //                    ext_mem_num);
 	    printf("Host-backed memory data mbuf pool: %s\n", name);
 	    data_pktmbuf_pool =
-		    rte_pktmbuf_pool_create(name, get_nb_mbuf(numa_node),
+		    rte_pktmbuf_pool_create(name, nb_mbuf,
 					    MBUF_CACHE_SIZE, 0,
 					    ext_mem[0].elt_size,
 					    numa_node);
     }
 
     if (!data_pktmbuf_pool) {
-	    errh->error("Could not allocate data MBuf pools %d with %d buffers : error %d (%s)",numa_node, get_nb_mbuf(numa_node), rte_errno,rte_strerror(rte_errno));
+	    errh->error("Could not allocate data MBuf pools %d with %d buffers : error %d (%s)",numa_node, nb_mbuf, rte_errno,rte_strerror(rte_errno));
+	    return rte_errno;
+    }
+
+    hdr_pktmbuf_pool = rte_pktmbuf_pool_create(hname, nb_mbuf,
+					       MBUF_CACHE_SIZE, DPDK_ANNO_SIZE,
+					       _rx_pkt_seg_lengths[0], numa_node);
+    if (!hdr_pktmbuf_pool) {
+	    errh->error("Could not allocate hdr MBuf pools %d with %d buffers : error %d (%s)",numa_node, nb_mbuf, rte_errno,rte_strerror(rte_errno));
 	    return rte_errno;
     }
 
@@ -340,11 +367,6 @@ int DPDKDevice::alloc_pktmbufs(ErrorHandler* errh)
                         const char* name = mempool_name.c_str();
                         _pktmbuf_pools[i] =
 #if RTE_VERSION >= RTE_VERSION_NUM(2,2,0,0)
-                            dpdk_split_enabled ?
-                                rte_pktmbuf_pool_create(name, get_nb_mbuf(i),
-                                                        MBUF_CACHE_SIZE, DPDK_ANNO_SIZE,
-                                                        _rx_pkt_seg_lengths[0], i)
-			:
                                 rte_pktmbuf_pool_create(name, get_nb_mbuf(i),
                                                         MBUF_CACHE_SIZE, DPDK_ANNO_SIZE,
                                                         MBUF_DATA_SIZE, i);
@@ -355,7 +377,6 @@ int DPDKDevice::alloc_pktmbufs(ErrorHandler* errh)
                                         rte_pktmbuf_pool_init, NULL, rte_pktmbuf_init, NULL,
                                         i, 0);
 #endif
-
                         if (!_pktmbuf_pools[i]) {
                                 errh->error("Could not allocate packet MBuf pools %d with %d buffers : error %d (%s)",i, get_nb_mbuf(i), rte_errno,rte_strerror(rte_errno));
                                 return rte_errno;
@@ -583,6 +604,8 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
         }
 
         if (info.rx_queues.size() % info.num_pools != 0) {
+	    printf("resizing rx_queues from %d to %d\n", info.rx_queues.size(),
+		   ((info.rx_queues.size() / info.num_pools) + 1) * info.num_pools);
             info.rx_queues.resize(
                 ((info.rx_queues.size() / info.num_pools) + 1) * info.num_pools
             );
@@ -787,26 +810,42 @@ also                ETH_TXQ_FLAGS_NOMULTMEMP
 	    struct rte_eth_rxseg rx_seg[MAX_SEGS_BUFFER_SPLIT] = {};
 	    unsigned seg_i;
 
+	    if (DPDKDevice::MAX_HDS_QUEUES == -1)
+		    DPDKDevice::MAX_HDS_QUEUES = info.rx_queues.size();
+
 	    if (alloc_pktmbufs_data(errh, numa_node))
 		    return errh->error("Failed to allocate pktmbuf data\n");
 
 	    rx_seg[0].length = _rx_pkt_seg_lengths[0] - RTE_PKTMBUF_HEADROOM;
 	    rx_seg[1].length = _rx_pkt_seg_lengths[1];
 
-	    rx_seg[0].mp = _pktmbuf_pools[numa_node];
+	    //rx_seg[0].mp = _pktmbuf_pools[numa_node];
+	    rx_seg[0].mp = hdr_pktmbuf_pool;
 	    rx_seg[1].mp = data_pktmbuf_pool;
 
 	    rx_conf.offloads |= DEV_RX_OFFLOAD_BUFFER_SPLIT | DEV_RX_OFFLOAD_SCATTER;
 	    tx_conf.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
 	    for (unsigned i = 0; i < (unsigned)info.rx_queues.size(); ++i) {
-		    // 2x n_rx_descs as each packet is two descriptors
-		    if (rte_eth_rx_queue_setup_ex(port_id, i,
-						    info.n_rx_descs * 2, numa_node,
-						    &rx_conf,
-						    rx_seg, MAX_SEGS_BUFFER_SPLIT))
-		    return errh->error(
-			"Cannot initialize extended RX queue %u of port %u on node %u : %s",
-			i, port_id, numa_node, rte_strerror(rte_errno));
+		    if (i < DPDKDevice::MAX_HDS_QUEUES) {
+			    printf("Creates extended Rx queue %d\n", i);
+			    // 2x n_rx_descs as each packet is two descriptors
+			    if (rte_eth_rx_queue_setup_ex(port_id, i,
+							  info.n_rx_descs * 2, numa_node,
+							  &rx_conf,
+							  rx_seg, MAX_SEGS_BUFFER_SPLIT))
+			    return errh->error(
+				"Cannot initialize extended RX queue %u of port %u on node %u : %s",
+				i, port_id, numa_node, rte_strerror(rte_errno));
+		    } else {
+			    printf("Creates normal Rx queue %d\n", i);
+			    if (rte_eth_rx_queue_setup(port_id, i, info.n_rx_descs,
+						       numa_node, &rx_conf,
+						       _pktmbuf_pools[numa_node]) != 0)
+				    return errh->error(
+						       "Cannot initialize RX queue %u of port %u on node %u : %s",
+						       i, port_id, numa_node, rte_strerror(rte_errno));
+
+		    }
 	    }
     } else {
 	    tx_conf.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
@@ -820,12 +859,13 @@ also                ETH_TXQ_FLAGS_NOMULTMEMP
 	    }
     }
 
-    for (unsigned i = 0; i < (unsigned)info.tx_queues.size(); ++i)
-        if (rte_eth_tx_queue_setup(port_id, i, info.n_tx_descs, numa_node,
-                                   &tx_conf) != 0)
+    for (unsigned i = 0; i < (unsigned)info.tx_queues.size(); ++i) {
+	unsigned int txd = (i < DPDKDevice::MAX_HDS_QUEUES) ? 2 * info.n_tx_descs : info.n_tx_descs;
+        if (rte_eth_tx_queue_setup(port_id, i, txd, numa_node, &tx_conf) != 0)
             return errh->error(
                 "Cannot initialize TX queue %u of port %u on node %u",
                 i, port_id, numa_node);
+    }
 
     if (info.init_mtu != 0) {
         if (dev_conf.rxmode.max_rx_pkt_len < info.init_mtu) {
@@ -1535,6 +1575,7 @@ int DPDKDevice::MBUF_DATA_SIZE = 2048 + RTE_PKTMBUF_HEADROOM + DPDK_ANNO_SIZE;
 int DPDKDevice::MBUF_SIZE = MBUF_DATA_SIZE
                           + sizeof (struct rte_mbuf);
 int DPDKDevice::MBUF_CACHE_SIZE = 256;
+int DPDKDevice::MAX_HDS_QUEUES = -1; // all queues
 int DPDKDevice::RX_PTHRESH = 8;
 int DPDKDevice::RX_HTHRESH = 8;
 int DPDKDevice::RX_WTHRESH = 4;
